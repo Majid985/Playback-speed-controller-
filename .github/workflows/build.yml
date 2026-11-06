@@ -1,23 +1,485 @@
 name: Build SpeedStream Android APK
+
 on: [push, workflow_dispatch]
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Extract Project ZIP
-        run: unzip -o SpeedStreamController_Project.zip
-      - uses: actions/setup-java@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Project Files
+        run: |
+          mkdir -p app/src/main/java/com/example/speedstreamcontroller
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SpeedStreamController"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          android.useAndroidX=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.speedstreamcontroller"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.example.speedstreamcontroller"
+                  minSdk = 24
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {}
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application
+                  android:allowBackup="true"
+                  android:hardwareAccelerated="true"
+                  android:label="SpeedStream"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".FloatingSpeedOverlayService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="floating_video_playback_speed_controller_overlay" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          curl -sSL "https://raw.githubusercontent.com/actions/virtual-environments/main/README.md" > /dev/null || true
+          python3 -c "import base64; open('app/src/main/java/com/example/speedstreamcontroller/SpeedStreamController.kt', 'w').write('''$(curl -s https://raw.githubusercontent.com/actions/starter-workflows/main/README.md >/dev/null || true)''')" 2>/dev/null || true
+
+      - name: Create App Code
+        run: |
+          cat << 'EOF' > app/src/main/java/com/example/speedstreamcontroller/SpeedStreamController.kt
+          package com.example.speedstreamcontroller
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.SharedPreferences
+          import android.content.pm.ServiceInfo
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.IBinder
+          import android.provider.Settings
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.webkit.CookieManager
+          import android.webkit.PermissionRequest
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.util.Locale
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          object SpeedPreferences {
+              private const val PREFS_NAME = "speed_stream_prefs"
+              private const val KEY_PLAYBACK_SPEED = "saved_playback_speed"
+              private const val KEY_LAST_STREAM_URL = "last_stream_url"
+              const val ACTION_SPEED_CHANGED = "com.example.speedstreamcontroller.ACTION_SPEED_CHANGED"
+              const val EXTRA_SPEED = "extra_playback_speed"
+
+              fun getSpeed(ctx: Context): Float =
+                  ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .getFloat(KEY_PLAYBACK_SPEED, 1.0f).coerceIn(0.25f, 4.0f)
+
+              fun setSpeed(ctx: Context, speed: Float) {
+                  val clamped = ((speed * 100f).roundToInt() / 100f).coerceIn(0.25f, 4.0f)
+                  ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .edit().putFloat(KEY_PLAYBACK_SPEED, clamped).apply()
+                  val intent = Intent(ACTION_SPEED_CHANGED).apply {
+                      setPackage(ctx.packageName)
+                      putExtra(EXTRA_SPEED, clamped)
+                  }
+                  ctx.sendBroadcast(intent)
+              }
+
+              fun getLastUrl(ctx: Context): String =
+                  ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .getString(KEY_LAST_STREAM_URL, "https://www.crunchyroll.com") ?: "https://www.crunchyroll.com"
+
+              fun setLastUrl(ctx: Context, url: String) {
+                  ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                      .edit().putString(KEY_LAST_STREAM_URL, url).apply()
+              }
+
+              fun formatSpeed(speed: Float): String =
+                  if (speed % 0.25f == 0f && (speed * 10f) % 1f == 0f) String.format(Locale.US, "%.1fx", speed)
+                  else String.format(Locale.US, "%.2fx", speed)
+          }
+
+          class FloatingSpeedOverlayService : Service() {
+              private lateinit var wm: WindowManager
+              private var rootOverlay: View? = null
+              private lateinit var badge: TextView
+              private lateinit var panel: LinearLayout
+              private lateinit var label: TextView
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  startForegroundServiceCompat()
+                  createOverlay()
+              }
+
+              private fun startForegroundServiceCompat() {
+                  val channelId = "speed_overlay"
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val chan = NotificationChannel(channelId, "Speed Overlay", NotificationManager.IMPORTANCE_LOW)
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(chan)
+                  }
+                  val notif = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, channelId)
+                               else @Suppress("DEPRECATION") Notification.Builder(this))
+                      .setContentTitle("SpeedStream Active")
+                      .setContentText("Tap overlay to adjust speed")
+                      .setSmallIcon(android.R.drawable.ic_media_ff)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                      startForeground(1001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(1001, notif)
+                  }
+              }
+
+              @SuppressLint("ClickableViewAccessibility")
+              private fun createOverlay() {
+                  val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      layoutType,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = dp(16)
+                      y = dp(180)
+                  }
+
+                  val container = FrameLayout(this)
+                  val speed = SpeedPreferences.getSpeed(this)
+
+                  badge = TextView(this).apply {
+                      text = "⚡ ${SpeedPreferences.formatSpeed(speed)}"
+                      setTextColor(Color.WHITE)
+                      setTypeface(typeface, Typeface.BOLD)
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                      setPadding(dp(12), dp(8), dp(12), dp(8))
+                      background = GradientDrawable().apply {
+                          cornerRadius = dp(20).toFloat()
+                          setColor(Color.parseColor("#E6FF6D00"))
+                      }
+                  }
+
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(12), dp(10), dp(12), dp(10))
+                      background = GradientDrawable().apply {
+                          cornerRadius = dp(16).toFloat()
+                          setColor(Color.parseColor("#F21E1E24"))
+                          setStroke(dp(1), Color.parseColor("#FF6D00"))
+                      }
+                      visibility = View.GONE
+                  }
+
+                  label = TextView(this).apply {
+                      text = "Speed: ${SpeedPreferences.formatSpeed(speed)}"
+                      setTextColor(Color.WHITE)
+                      setTypeface(typeface, Typeface.BOLD)
+                      setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                  }
+                  panel.addView(label)
+
+                  val stepperRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(0, dp(8), 0, dp(4))
+                  }
+                  stepperRow.addView(createBtn("-0.25x") { adjust(-0.25f) })
+                  stepperRow.addView(createBtn("1.0x") { applySpeed(1.0f) })
+                  stepperRow.addView(createBtn("+0.25x") { adjust(0.25f) })
+                  panel.addView(stepperRow)
+
+                  val presetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  listOf(1.25f, 1.5f, 1.75f, 2.0f).forEach { p ->
+                      presetRow.addView(createBtn("${p}x") {
+                          applySpeed(p)
+                          badge.visibility = View.VISIBLE
+                          panel.visibility = View.GONE
+                      })
+                  }
+                  panel.addView(presetRow)
+
+                  container.addView(badge)
+                  container.addView(panel)
+
+                  var ix = 0; var iy = 0; var tx = 0f; var ty = 0f
+                  badge.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              ix = params.x; iy = params.y; tx = e.rawX; ty = e.rawY; true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              params.x = ix + (e.rawX - tx).roundToInt()
+                              params.y = iy + (e.rawY - ty).roundToInt()
+                              wm.updateViewLayout(container, params); true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (abs(e.rawX - tx) < dp(8) && abs(e.rawY - ty) < dp(8)) {
+                                  badge.visibility = View.GONE
+                                  panel.visibility = View.VISIBLE
+                              }
+                              true
+                          }
+                          else -> false
+                      }
+                  }
+
+                  rootOverlay = container
+                  wm.addView(container, params)
+              }
+
+              private fun createBtn(t: String, onClick: () -> Unit): TextView =
+                  TextView(this).apply {
+                      text = t
+                      setTextColor(Color.WHITE)
+                      setTypeface(typeface, Typeface.BOLD)
+                      setPadding(dp(8), dp(4), dp(8), dp(4))
+                      background = GradientDrawable().apply {
+                          cornerRadius = dp(8).toFloat()
+                          setColor(Color.parseColor("#33FFFFFF"))
+                      }
+                      setOnClickListener { onClick() }
+                  }
+
+              private fun adjust(delta: Float) {
+                  val s = (SpeedPreferences.getSpeed(this) + delta).coerceIn(0.25f, 4.0f)
+                  applySpeed(s)
+              }
+
+              private fun applySpeed(s: Float) {
+                  SpeedPreferences.setSpeed(this, s)
+                  val fmt = SpeedPreferences.formatSpeed(s)
+                  badge.text = "⚡ $fmt"
+                  label.text = "Speed: $fmt"
+              }
+
+              private fun dp(v: Int): Int =
+                  TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).roundToInt()
+
+              override fun onDestroy() {
+                  rootOverlay?.let { wm.removeView(it) }
+                  super.onDestroy()
+              }
+          }
+
+          class MainActivity : Activity() {
+              private lateinit var webView: WebView
+              private lateinit var urlInput: EditText
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      val speed = intent?.getFloatExtra(SpeedPreferences.EXTRA_SPEED, 1.0f) ?: 1.0f
+                      injectSpeed(speed)
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#121318"))
+                  }
+                  val topBar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(16, 16, 16, 16)
+                  }
+                  urlInput = EditText(this).apply {
+                      setText(SpeedPreferences.getLastUrl(this@MainActivity))
+                      setTextColor(Color.WHITE)
+                      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+                  val loadBtn = Button(this).apply {
+                      text = "Go"
+                      setOnClickListener {
+                          var u = urlInput.text.toString().trim()
+                          if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://$u"
+                          SpeedPreferences.setLastUrl(this@MainActivity, u)
+                          webView.loadUrl(u)
+                      }
+                  }
+                  val bubbleBtn = Button(this).apply {
+                      text = "Start Bubble"
+                      setOnClickListener { checkOverlayAndStart() }
+                  }
+                  topBar.addView(urlInput)
+                  topBar.addView(loadBtn)
+                  topBar.addView(bubbleBtn)
+
+                  webView = WebView(this).apply {
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+                  }
+                  setupWebView()
+
+                  root.addView(topBar)
+                  root.addView(webView)
+                  setContentView(root)
+
+                  val filter = IntentFilter(SpeedPreferences.ACTION_SPEED_CHANGED)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      registerReceiver(receiver, filter)
+                  }
+
+                  checkOverlayAndStart()
+                  webView.loadUrl(SpeedPreferences.getLastUrl(this))
+              }
+
+              private fun checkOverlayAndStart() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      startActivity(intent)
+                  } else {
+                      val serviceIntent = Intent(this, FloatingSpeedOverlayService::class.java)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
+                      else startService(serviceIntent)
+                  }
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              private fun setupWebView() {
+                  CookieManager.getInstance().setAcceptCookie(true)
+                  webView.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      userAgentString = "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                  }
+                  webView.webChromeClient = object : WebChromeClient() {
+                      override fun onPermissionRequest(r: PermissionRequest) {
+                          if (r.resources.contains(PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID)) {
+                              r.grant(arrayOf(PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID))
+                          }
+                      }
+                  }
+                  webView.webViewClient = object : WebViewClient() {
+                      override fun onPageFinished(view: WebView?, url: String?) {
+                          injectSpeed(SpeedPreferences.getSpeed(this@MainActivity))
+                      }
+                  }
+              }
+
+              private fun injectSpeed(speed: Float) {
+                  val js = "setInterval(function(){ document.querySelectorAll('video').forEach(function(v){ if(Math.abs(v.playbackRate - $speed) > 0.01) v.playbackRate = $speed; }); }, 1000);"
+                  webView.evaluateJavascript(js, null)
+              }
+
+              override fun onDestroy() {
+                  unregisterReceiver(receiver)
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload Ready-to-Install APK
+        uses: actions/upload-artifact@v4
         with:
           name: SpeedStreamController-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          
